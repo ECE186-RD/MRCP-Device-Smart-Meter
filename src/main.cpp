@@ -6,20 +6,38 @@
 #include <time.h>
 //#include <BLENode.h>
 
+int readRange();
+
 //Following code from https://iotbyhvm.ooo/esp32-ble-tutorials/
 BLECharacteristic *pCharacteristic;
 bool deviceConnected = false;
 float txValue = 0;
 
 const int LED = 2; // Could be different depending on the dev board. I used the DOIT ESP32 dev board.
-const int mPin1 = 4;  // GPIO 4, input into h-bridge
+
+// Pins and variables for Ultrasonic
+const int echoPin = 19;   // Red wire
+const int trigPin = 21;   // Brown wire
+long durationSoundWave;
+int distance;
+const int maxDetectionDistance = 100; // Distance a car needs to be within
+const int minDetectionDistance = 15;   // Too close == error
+const int tolerance = 3;              // incorporate to account for error
+
+// Pins for RGB LED
+const int ledRed = 18;
+const int ledGreen = 17;
+const int ledBlue = 16;
 
 std::string delimiter = ",";
 const double rate = 1/36; // Based off of cost $0.25 per 15 min, but per seconds
 time_t start;
 double duration;  // double or time_t?
-double violationTimeLimit = 300;  // Grace period before violation (seconds)
-double sonicSensor = 0;
+
+// 10 seconds is just for testing, ideally 300 seconds?
+double violationTimeLimit = 10;  // Grace period before violation (seconds)
+
+double sonicSensor = 1;
 
 //std::string rxValue; // Could also make this a global var to access it in loop()
 
@@ -65,17 +83,19 @@ class MyCallbacks: public BLECharacteristicCallbacks {
           // State: s3 = Valid Parking
           start = time(0);     // Restarting the clock
           Serial.println("Starting!");
-          digitalWrite(LED, HIGH);
           txValue=1;
-          double sonicSensor_init = 0; // Read in sensor value now
+          int sonicSensor_init = readRange(); // Read in sensor value now
 
-          while(sonicSensor_init <= sonicSensor) {
+          while((sonicSensor_init + tolerance) >= distance) {
             /*
-             Will stay in this loop until sensor reads a further distance
+             Will stay in this loop until sensor reads a further distance which means the car has left
              Not closer since someone may walk infront of meter
-             Not sure if <= or >=, will change after sensor installed
              Could account for Tape attack
              */
+             distance = readRange();
+             digitalWrite(ledGreen, HIGH);
+             delay(500);
+             digitalWrite(ledGreen, LOW);
         }
 
         duration = difftime( time(0), start);  // Stopping the clock
@@ -84,16 +104,24 @@ class MyCallbacks: public BLECharacteristicCallbacks {
         double totalCost = round(duration * rate);  // Total cost to customer
         // process payment?
         Serial.println(totalCost);
-        digitalWrite(LED, LOW); // Will modify to fit multicolored leds
         txValue=0;
     }
   }
+}
 };
 
 void setup() {
+
   Serial.begin(11500);
   pinMode(LED, OUTPUT);
-  pinMode (mPin1, OUTPUT);
+  pinMode (echoPin, INPUT);
+  pinMode (trigPin, OUTPUT);
+  //pinMode (ledVolt, OUTPUT); // Leave out for now... Setting LED high
+  pinMode (ledRed, OUTPUT);
+  pinMode (ledGreen, OUTPUT);
+  pinMode (ledBlue, OUTPUT);
+
+  //digitalWrite(ledVolt, HIGH);
 
   BLEDevice::init("MRCP Smart Meter"); // Give it a name
   // Create the BLE Server
@@ -133,9 +161,19 @@ void setup() {
 }
 
 void loop() {
-  if (deviceConnected & (sonicSensor !=0)) {
+  distance = readRange();
+
+  if(distance > 40)
+    digitalWrite(LED, HIGH);
+  else
+    digitalWrite(LED, LOW);
+
+  Serial.print("Distance: ");
+  Serial.println(distance);
+
+  if (deviceConnected & (distance < maxDetectionDistance)) {
     // Let's convert the value to a char array:
-    char txString[8]; // make sure this is big enough
+    char txString[8]; // Make sure this is big enough
     dtostrf(txValue, 1, 2, txString); // float_val, min_width, digits_after_decimal, char_buffer
 
     pCharacteristic->setValue(txString);
@@ -145,24 +183,51 @@ void loop() {
     Serial.println(txString);
     Serial.print(" ***");
   }
-  else if (sonicSensor != 0) {
-    while(sonicSensor == 9999){
-      // State: s5 = TAPE ALERT
+  else if (distance < maxDetectionDistance) {
+    while(distance < minDetectionDistance){
+      // State: s5 = Maintance Required, LED = Solid Red
       // If sensor gets covered in tape, then stay here until resolved.
-      digitalWrite(LED,HIGH);
+      digitalWrite(ledRed, HIGH);
+      distance = readRange();
     }
-      // State: s1 = standby
+      digitalWrite(ledRed, LOW);
+
+      int initialDistance = distance; // Saving the distance the car is currently at
       start = time(0);     // Restarting the clock
-      while(sonicSensor !=0){
+      while(distance <= initialDistance){
         duration = difftime( time(0), start);
         if(duration >= violationTimeLimit){
-          // State: s2 = violation
-          digitalWrite(LED, HIGH);
+          // State: s2 = violation, LED = Blink RED
+          digitalWrite(ledRed, HIGH);
+          delay(250);
+          digitalWrite(ledRed, LOW);
+          delay(250);
         }
+        else{
+          // State: s1 = standby, LED = Blink Yellow
+          digitalWrite(ledGreen, HIGH);
+          digitalWrite(ledBlue, HIGH);
+          digitalWrite(ledRed, HIGH);
+          delay(500);
+          digitalWrite(ledGreen, LOW);
+          digitalWrite(ledBlue, LOW);
+          digitalWrite(ledRed, LOW);
+          delay(500);
+        }
+        distance = readRange();
       }
   }
-  // else, State: s0 = Available
-  digitalWrite(LED,LOW);
+  // else, State: s0 = Available, LED = off
   delay(100);
 }
-};
+
+int readRange(){
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  durationSoundWave = pulseIn(echoPin, HIGH);
+  return durationSoundWave*0.034/2; // Returning the distance
+}
